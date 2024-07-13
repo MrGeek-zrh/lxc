@@ -18,6 +18,7 @@
  *  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
  */
 
+#include <cstring>
 #define _GNU_SOURCE
 #include <assert.h>
 #include <stdarg.h>
@@ -3467,6 +3468,11 @@ struct criu_opts {
     const char *cgroup_path;
 };
 
+/**
+ * 执行 CRIU 命令。
+ *
+ * @param opts 包含 CRIU 命令选项的结构体。
+ */
 static void exec_criu(struct criu_opts *opts)
 {
     char **argv, log[PATH_MAX], buf[257];
@@ -3474,42 +3480,48 @@ static void exec_criu(struct criu_opts *opts)
     int netnr = 0;
     struct lxc_list *it;
 
-    /* The command line always looks like:
-	 * criu $(action) --tcp-established --file-locks --link-remap --force-irmap \
-	 * --manage-cgroups action-script foo.sh -D $(directory) \
-	 * -o $(directory)/$(action).log
-	 * +1 for final NULL */
+    /* 构建 CRIU 命令行参数数组。
+      * 命令行通常如下：
+      * criu $(action) --tcp-established --file-locks --link-remap --force-irmap \
+      * --manage-cgroups action-script foo.sh -D $(directory) \
+      * -o $(directory)/$(action).log
+      * +1 表示最后的 NULL */
 
+    // 根据不同的操作（dump 或 restore），增加静态参数数量
     if (strcmp(opts->action, "dump") == 0) {
-        /* -t pid */
+        /* -t pid 参数 */
         static_args += 2;
 
-        /* --leave-running */
+        /* --leave-running 参数（如果 stop 为 false） */
         if (!opts->stop)
             static_args++;
     } else if (strcmp(opts->action, "restore") == 0) {
-        /* --root $(lxc_mount_point) --restore-detached
-		 * --restore-sibling --pidfile $foo --cgroup-root $foo */
+        /* restore 操作的额外参数 */
         static_args += 8;
     } else {
-        return;
+        return; // 如果不是 dump 或 restore 操作，直接返回
     }
 
+    // 如果 verbose 为 true，增加一个参数
     if (opts->verbose)
         static_args++;
 
+    // 构建日志文件路径
     ret = snprintf(log, PATH_MAX, "%s/%s.log", opts->directory, opts->action);
     if (ret < 0 || ret >= PATH_MAX) {
         ERROR("logfile name too long\n");
         return;
     }
 
+    // 分配 argv 数组
     argv = malloc(static_args * sizeof(*argv));
     if (!argv)
         return;
 
+    // 将 argv 数组初始化为 NULL
     memset(argv, 0, static_args * sizeof(*argv));
 
+    // 宏定义，用于添加参数到 argv 数组
 #define DECLARE_ARG(arg)                         \
     do {                                         \
         if (arg == NULL) {                       \
@@ -3521,12 +3533,14 @@ static void exec_criu(struct criu_opts *opts)
             goto err;                            \
     } while (0)
 
+    // 添加 criu 命令到 argv 数组
     argv[argc++] = on_path("criu", NULL);
     if (!argv[argc - 1]) {
         ERROR("Couldn't find criu binary\n");
         goto err;
     }
 
+    // 添加公共参数到 argv 数组
     DECLARE_ARG(opts->action);
     DECLARE_ARG("--tcp-established");
     DECLARE_ARG("--file-locks");
@@ -3540,20 +3554,25 @@ static void exec_criu(struct criu_opts *opts)
     DECLARE_ARG("-o");
     DECLARE_ARG(log);
 
+    // 如果 verbose 为 true，添加详细日志参数
     if (opts->verbose)
         DECLARE_ARG("-vvvvvv");
 
+    // 根据不同的操作，添加不同的参数
     if (strcmp(opts->action, "dump") == 0) {
         char pid[32];
 
+        // 获取容器的初始 PID
         if (sprintf(pid, "%d", lxcapi_init_pid(opts->c)) < 0)
             goto err;
 
+        // 添加 dump 操作的特定参数
         DECLARE_ARG("-t");
         DECLARE_ARG(pid);
         if (!opts->stop)
             DECLARE_ARG("--leave-running");
     } else if (strcmp(opts->action, "restore") == 0) {
+        // 添加 restore 操作的特定参数
         DECLARE_ARG("--root");
         DECLARE_ARG(opts->c->lxc_conf->rootfs.mount);
         DECLARE_ARG("--restore-detached");
@@ -3563,37 +3582,49 @@ static void exec_criu(struct criu_opts *opts)
         DECLARE_ARG("--cgroup-root");
         DECLARE_ARG(opts->cgroup_path);
 
+        // 遍历容器的网络配置，添加网络相关参数
         lxc_list_for_each(it, &opts->c->lxc_conf->network)
         {
             char eth[128], *veth;
             void *m;
             struct lxc_netdev *n = it->elem;
 
+            // 设置以太网接口名称
             if (n->name) {
                 if (strlen(n->name) >= sizeof(eth))
                     goto err;
                 strncpy(eth, n->name, sizeof(eth));
-            } else
+            } else {
                 sprintf(eth, "eth%d", netnr);
+            }
 
+            // 获取虚拟以太网设备对的名称
             veth = n->priv.veth_attr.pair;
 
+            // 格式化以太网接口和虚拟以太网设备对的名称
             ret = snprintf(buf, sizeof(buf), "%s=%s", eth, veth);
             if (ret < 0 || ret >= sizeof(buf))
                 goto err;
 
-            /* final NULL and --veth-pair eth0=vethASDF */
+            // 重新分配 argv 数组以增加新的参数
             m = realloc(argv, (argc + 1 + 2) * sizeof(*argv));
             if (!m)
                 goto err;
             argv = m;
 
+            // 添加 --veth-pair 参数及其值
             DECLARE_ARG("--veth-pair");
             DECLARE_ARG(buf);
+
+            // 确保参数数组以 NULL 结尾
             argv[argc] = NULL;
+
+            // 增加网络接口计数器
+            netnr++;
         }
     }
 
+    // 重置网络接口计数器，设置环境变量用于网络恢复
     netnr = 0;
     lxc_list_for_each(it, &opts->c->lxc_conf->network)
     {
@@ -3601,10 +3632,9 @@ static void exec_criu(struct criu_opts *opts)
         char veth[128];
 
         /*
-		 * Here, we set some parameters that lxc-restore-net
-		 * will examine to figure out the right network to
-		 * restore.
-		 */
+          * 这里我们设置一些参数，lxc-restore-net 将会检查这些参数
+          * 以找出正确的网络来恢复。
+          */
         snprintf(buf, sizeof(buf), "LXC_CRIU_BRIDGE%d", netnr);
         if (setenv(buf, n->link, 1))
             goto err;
@@ -3628,9 +3658,11 @@ static void exec_criu(struct criu_opts *opts)
         netnr++;
     }
 
+    // 执行 CRIU 命令
 #undef DECLARE_ARG
     execv(argv[0], argv);
 err:
+    // 发生错误时，释放已分配的内存
     for (i = 0; argv[i]; i++)
         free(argv[i]);
     free(argv);
@@ -3738,47 +3770,66 @@ static bool dump_net_info(struct lxc_container *c, char *directory)
     return true;
 }
 
+/**
+ * 检查点运行中的容器。
+ *
+ * @param c 要检查点的容器。
+ * @param directory 保存检查点数据的目录。
+ * @param stop 如果为 true，容器将在检查点之后停止。
+ * @param verbose 如果为 true，在检查点过程中启用详细日志记录。
+ * @return 成功返回 true，失败返回 false。
+ */
 static bool lxcapi_checkpoint(struct lxc_container *c, char *directory, bool stop, bool verbose)
 {
     pid_t pid;
     int status;
 
+    // 检查容器是否支持 CRIU（用户空间的检查点/恢复）
     if (!criu_ok(c))
         return false;
 
+    // 尝试创建保存检查点数据的目录，权限为 0700
     if (mkdir(directory, 0700) < 0 && errno != EEXIST)
         return false;
 
+    // 将网络信息转储到指定目录
     if (!dump_net_info(c, directory))
         return false;
 
+    // fork 当前进程以创建用于检查点的子进程
     pid = fork();
     if (pid < 0)
-        return false;
+        return false; // fork 失败
 
     if (pid == 0) {
+        // 子进程：准备并执行用于检查点的 CRIU 命令
+
         struct criu_opts os;
+        os.action = "dump"; // 将操作设置为 "dump" 以进行检查点
+        os.directory = directory; // 设置检查点数据的目录
+        os.c = c; // 传递容器对象
+        os.stop = stop; // 传递停止标志
+        os.verbose = verbose; // 传递详细标志
 
-        os.action = "dump";
-        os.directory = directory;
-        os.c = c;
-        os.stop = stop;
-        os.verbose = verbose;
-
-        /* exec_criu() returning is an error */
+        // 执行 CRIU 命令；如果 exec_criu() 返回，则发生错误
         exec_criu(&os);
-        exit(1);
+        exit(1); // 如果 exec_criu() 返回，则以错误状态退出
     } else {
-        pid_t w = waitpid(pid, &status, 0);
+        // 父进程：等待子进程完成
+
+        pid_t w = waitpid(pid, &status, 0); // 等待子进程
         if (w == -1) {
-            perror("waitpid");
+            perror("waitpid"); // 如果 waitpid() 失败，打印错误消息
             return false;
         }
 
+        // 检查子进程是否正常退出
         if (WIFEXITED(status)) {
+            // 如果子进程以状态 0（成功）退出，则返回 true，否则返回 false
             return !WEXITSTATUS(status);
         }
 
+        // 如果子进程未正常退出，则返回 false
         return false;
     }
 }
