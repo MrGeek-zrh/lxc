@@ -19,6 +19,7 @@
  */
 
 #include <cstring>
+#include <stdio.h>
 #define _GNU_SOURCE
 #include <assert.h>
 #include <stdarg.h>
