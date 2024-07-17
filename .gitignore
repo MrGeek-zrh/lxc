@@ -149,3 +149,6 @@ patches
 *.orig
 *.rej
 tags
+
+/build
+/compile_commands.json
